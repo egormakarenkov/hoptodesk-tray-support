@@ -1,0 +1,119 @@
+diff --git a/src/ui.rs b/src/ui.rs
+index bc619d5..a39ba81 100644
+--- a/src/ui.rs
++++ b/src/ui.rs
+@@ -31,6 +31,8 @@ use tokio::runtime::Runtime;
+ use std::net::ToSocketAddrs;
+ 
+ mod cm;
++#[cfg(target_os = "windows")]
++mod cm_tray;
+ #[cfg(feature = "inline")]
+ pub mod inline;
+ pub mod remote;
+@@ -121,6 +123,7 @@ pub fn start(args: &mut [String]) {
+         frame.event_handler(UI {});
+         frame.set_host_handler(UIHostHandler {});
+         page = "index.html";
++        crate::ui_interface::start_option_status_sync();
+         // Start pulse audio local server.
+         #[cfg(target_os = "linux")]
+         std::thread::spawn(crate::ipc::start_pa);
+@@ -1883,4 +1886,4 @@ pub fn get_icon() -> String {
+         let base64_str = base64::encode(icon_data, base64::Variant::Original);
+         format!("data:image/x-icon;base64,{}", base64_str)
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/ui/cm.rs b/src/ui/cm.rs
+index caa1e3b..cde7aa4 100644
+--- a/src/ui/cm.rs
++++ b/src/ui/cm.rs
+@@ -135,7 +135,7 @@ impl InvokeUiCM for CmUiHandler {
+ 
+ impl CmUiHandler {
+     #[inline]
+-    fn call(&self, func: &'static str, args: &[Value]) {
++    pub(super) fn call(&self, func: &'static str, args: &[Value]) {
+         self.ui_tx.send(UiCall::Method(func, args.to_vec())).ok();
+     }
+ 
+@@ -200,6 +200,8 @@ impl CmConnectionManager {
+         let cm = ConnectionManager {
+             ui_handler: CmUiHandler::default(),
+         };
++        #[cfg(target_os = "windows")]
++        super::cm_tray::start(cm.ui_handler.clone());
+         let cloned = cm.clone();
+         std::thread::spawn(move || start_ipc(cloned));
+         CmConnectionManager(cm)
+@@ -275,6 +277,16 @@ impl CmConnectionManager {
+         std::env::args().any(|a| a == "--hide")
+     }    
+ 
++    fn can_hide_to_tray(&self) -> bool {
++        #[cfg(target_os = "windows")]
++        {
++            return super::cm_tray::is_ready()
++                && crate::ui_interface::get_option("allow-session-panel-tray") == "Y";
++        }
++        #[cfg(not(target_os = "windows"))]
++        false
++    }
++
+     fn accept_invite(&mut self, id: i32) {
+         log::info!("Invite accepted for connection id {}", id);
+         if let Some(client) = crate::ui_cm_interface::get_clients_lock().ok().and_then(|clients| clients.get(&id).cloned()) {
+@@ -348,6 +360,7 @@ impl wireui::EventHandler for CmConnectionManager {
+         fn elevate_portable(i32);
+         fn get_option(String);
+         fn is_cm_hidden();
++        fn can_hide_to_tray();
+         fn is_permission_locked(String);
+         fn accept_invite(i32);
+         fn decline_invite(i32);
+diff --git a/src/ui/cm.tis b/src/ui/cm.tis
+index 29c74a8..eda384a 100644
+--- a/src/ui/cm.tis
++++ b/src/ui/cm.tis
+@@ -553,7 +553,15 @@ var cm_closed = false;
+ 
+ function minimize_cm() {
+     cm_closed = false;
+-    view.windowState = View.WINDOW_MINIMIZED;
++    view.windowState = handler.can_hide_to_tray() ? View.WINDOW_HIDDEN : View.WINDOW_MINIMIZED;
++}
++
++handler.showSessionPanel = function() {
++    // The engine can report SHOWN while the native window is hidden. Always
++    // synchronize winit visibility before changing topmost/window flags.
++    cm_closed = false;
++    view.windowState = View.WINDOW_SHOWN;
++    bring_to_top();
+ }
+ 
+ function bring_to_top(idx=-1) {
+@@ -722,6 +730,10 @@ handler.updateVoiceCallState = function(id, in_voice_call, incoming_voice_call)
+ }
+ 
+ view << event statechange {
++    if (view.windowState == View.WINDOW_MINIMIZED && handler.can_hide_to_tray()) {
++        view.windowState = View.WINDOW_HIDDEN;
++        return;
++    }
+     adjustBorder();
+     if (show_chat) adaptSizeForChat();
+ }
+diff --git a/src/ui/index.tis b/src/ui/index.tis
+index 40d56a0..6141903 100644
+--- a/src/ui/index.tis
++++ b/src/ui/index.tis
+@@ -841,6 +841,7 @@ class App: Reactor.Component
+                     <div .settings-section>
+                         <div .section-label>{translate("Appearance")}</div>
+                         <div class={settingRowClass("allow-darktheme")} tabindex="0" id="toggle-allow-darktheme" title={translate("Dark Theme") + " - " + (darkOn ? translate("On") : translate("Off"))}><span .setting-name>{translate("Dark Theme")}</span><div class={"toggle-switch " + toggleClass(darkOn)}><div .toggle-knob /></div></div>
++                        {is_win ? <div class={settingRowClass("allow-session-panel-tray")} tabindex="0" id="toggle-allow-session-panel-tray" title={translate("Minimize session panel to tray") + " - " + (handler.get_option("allow-session-panel-tray") == "Y" ? translate("On") : translate("Off"))}><span .setting-name>{translate("Minimize session panel to tray")}</span><div class={"toggle-switch " + toggleClass(handler.get_option("allow-session-panel-tray") == "Y")}><div .toggle-knob /></div></div> : ""}
+                         <div .setting-row .setting-action tabindex="0" id="action-language" title={translate("Language") + " - " + curLangName}><span .setting-name>{translate("Language")}</span><span .setting-value>{curLangName}</span></div>
+                     </div>
+                     <div .settings-section>

@@ -1,0 +1,12 @@
+diff --git a/libs/clipboard/src/windows/wf_cliprdr.c b/libs/clipboard/src/windows/wf_cliprdr.c
+index fd6ed5e..de062b7 100644
+--- a/libs/clipboard/src/windows/wf_cliprdr.c
++++ b/libs/clipboard/src/windows/wf_cliprdr.c
+@@ -30,6 +30,7 @@
+ #include <windows.h>
+ #include <winuser.h>
+ #include <tchar.h>
++#include <wchar.h>
+ 
+ #include <strsafe.h>
+ 

@@ -1,0 +1,103 @@
+// The session panel owns its restore icon, so it remains accessible independently
+// of the main window and the separate --tray process.
+use super::cm::CmUiHandler;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::platform::windows::EventLoopBuilderExtWindows;
+use tray_icon::{
+    menu::{Menu, MenuEvent, MenuItem},
+    MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
+};
+
+static READY: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn is_ready() -> bool {
+    READY.load(Ordering::Acquire)
+}
+
+pub(super) fn restore_panel(ui: &CmUiHandler) {
+    // The UI script runs on a different event loop. Restore the actual window
+    // first so recovery does not depend on a callback into a hidden document.
+    let hwnd = wireui::host::main_window_handle() as winapi::shared::windef::HWND;
+    unsafe {
+        if !hwnd.is_null() && winapi::um::winuser::IsWindow(hwnd) != 0 {
+            winapi::um::winuser::ShowWindowAsync(hwnd, winapi::um::winuser::SW_RESTORE);
+            winapi::um::winuser::SetForegroundWindow(hwnd);
+        }
+    }
+    ui.call("showSessionPanel", &[]);
+}
+
+pub(super) fn start(ui: CmUiHandler) {
+    std::thread::spawn(move || {
+        if let Err(err) = run(ui) {
+            hbb_common::log::error!("Session panel tray unavailable: {}", err);
+        }
+        READY.store(false, Ordering::Release);
+    });
+}
+
+fn run(ui: CmUiHandler) -> hbb_common::ResultType<()> {
+    let image = image::load_from_memory(include_bytes!("../../res/tray-icon.ico"))?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    let icon = tray_icon::Icon::from_rgba(image.into_raw(), width, height)?;
+    let mut builder = EventLoopBuilder::new();
+    builder.with_any_thread(true);
+    let event_loop = builder.build();
+    let menu = Menu::new();
+    let show = MenuItem::new("Show active session", true, None);
+    menu.append(&show)?;
+    let menu_events = MenuEvent::receiver();
+    let tray_events = TrayIconEvent::receiver();
+    let mut tray = None;
+    let mut attempted = false;
+
+    event_loop.run(move |_, _, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
+        let enabled = crate::ui_interface::get_option("allow-session-panel-tray") == "Y"
+            && crate::ui_interface::get_builtin_option(
+                hbb_common::config::keys::OPTION_HIDE_TRAY,
+            ) != "Y";
+        if enabled && !attempted {
+            attempted = true;
+            match TrayIconBuilder::new()
+                .with_menu(Box::new(menu.clone()))
+                .with_tooltip("HopToDesk - active session controls")
+                .with_icon(icon.clone())
+                .build()
+            {
+                Ok(created) => {
+                    tray = Some(created);
+                    READY.store(true, Ordering::Release);
+                }
+                Err(err) => hbb_common::log::error!("Session tray creation failed: {}", err),
+            }
+        } else if !enabled && attempted {
+            // Restore before removing the only guaranteed route to this panel.
+            READY.store(false, Ordering::Release);
+            restore_panel(&ui);
+            tray = None;
+            attempted = false;
+        }
+
+        while let Ok(event) = menu_events.try_recv() {
+            if event.id == show.id() {
+                restore_panel(&ui);
+            }
+        }
+        while let Ok(event) = tray_events.try_recv() {
+            if let (Some(icon), TrayIconEvent::Click { id, button, button_state, .. }) =
+                (tray.as_ref(), event)
+            {
+                if &id == icon.id()
+                    && button == MouseButton::Left
+                    && button_state == MouseButtonState::Up
+                {
+                    restore_panel(&ui);
+                }
+            }
+        }
+    });
+}
